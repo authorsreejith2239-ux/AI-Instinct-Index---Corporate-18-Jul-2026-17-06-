@@ -187,6 +187,12 @@
     // Super Admin two-layer access (both passwords entered in masked type="password" fields)
     const SUPER_ADMIN_PASS_1 = "osty";
     const SUPER_ADMIN_PASS_2 = "2239";
+    // Effective passwords: factory defaults unless changed under Super Admin → Security.
+    // Overrides live on this device only; no email/OTP recovery by design — the Super
+    // Admin credentials are themselves the recovery path for the admin password.
+    function getAdminPass() { try { return localStorage.getItem('ai_instinct_pw_admin') || CONFIG.ADMIN_PASS; } catch(e) { return CONFIG.ADMIN_PASS; } }
+    function getSaPass1() { try { return localStorage.getItem('ai_instinct_pw_sa1') || SUPER_ADMIN_PASS_1; } catch(e) { return SUPER_ADMIN_PASS_1; } }
+    function getSaPass2() { try { return localStorage.getItem('ai_instinct_pw_sa2') || SUPER_ADMIN_PASS_2; } catch(e) { return SUPER_ADMIN_PASS_2; } }
 
     // === GLOBAL DATE/TIME STANDARD (v13) ===
     // Single source of truth for every human-facing date/time: on-screen, PDF and CSV/Excel.
@@ -414,6 +420,7 @@
             opsAutoRefresh: true,
             opsLoading: false,
             opsFilters: { org: '', country: '', from: '', to: '', band: '', search: '' },
+            opsAlphaCompany: '',
             orgList: JSON.parse(localStorage.getItem('ai_instinct_orgs') || '[]'),
             orgDomains: JSON.parse(localStorage.getItem('ai_instinct_org_domains') || '{}'),
             orgProfiles: JSON.parse(localStorage.getItem('ai_instinct_orgprofiles') || '{}'),
@@ -1186,7 +1193,7 @@
             // Self-heal stale view state: the superadmin view is only valid while authenticated
             // as Super Admin. Any other combination falls back to the Diagnostic Console, so an
             // ordinary admin login never lands on a "Super Admin authentication required" shell.
-            if (this.state.adminView === 'superadmin' && !this.state.isSuperAdmin) {
+            if ((this.state.adminView === 'superadmin' || this.state.adminView === 'trash') && !this.state.isSuperAdmin) {
                 this.state.adminView = 'responses';
             }
             if (!this.state.isAdmin) {
@@ -1194,8 +1201,9 @@
                     <div class="py-6 md:py-10">
                         <div class="max-w-md mx-auto glass-card p-12 rounded-[3rem] text-center">
                             <h2 class="text-xl font-bold mb-8 uppercase tracking-widest">Admin Entry</h2>
-                            <input type="password" id="admin-p" class="w-full bg-slate-950/50 border border-white/10 p-5 rounded-2xl mb-6 outline-none focus:border-cyan-500 text-center text-3xl tracking-[0.5em]" placeholder="••••">
+                            <input type="password" id="admin-p" onkeydown="if(event.key==='Enter')app.login()" class="w-full bg-slate-950/50 border border-white/10 p-5 rounded-2xl mb-6 outline-none focus:border-cyan-500 text-center text-3xl tracking-[0.5em]" placeholder="••••">
                             <button onclick="app.login()" class="w-full bg-cyan-700 text-white font-black py-5 rounded-2xl hover:bg-cyan-600 transition-all uppercase tracking-widest text-xs">Authorize</button>
+                            <button onclick="app.forgotPasswordInfo()" class="mt-4 text-[10px] text-slate-500 hover:text-cyan-400 uppercase tracking-wider transition">Forgot password?</button>
                         </div>
                     </div>
                 `;
@@ -1305,25 +1313,62 @@
                             `}
                         </div>
                         
+                        <div class="glass-card p-6 rounded-2xl mb-6">
+                            <div class="flex flex-wrap items-center justify-between gap-4">
+                                <div>
+                                    <div class="text-[10px] text-slate-400 uppercase tracking-wider mb-1"><i class="fa-solid fa-earth-asia text-cyan-400 mr-2"></i>Aggregate View — Privacy Protected</div>
+                                    <p class="text-[9px] text-slate-500 max-w-2xl">This panel shows anonymised, portfolio-level aggregates only — no company names, respondent names, or emails. Record-level data is available inside the Ops Console, scoped to each organisation’s own assigned administrators; full-portfolio administration sits under Super Admin.</p>
+                                </div>
+                                <div class="flex flex-wrap gap-3">
+                                    <button onclick="app.openOpsView()" class="bg-teal-600 hover:bg-teal-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-satellite-dish mr-1"></i>Ops Console</button>
+                                    <button onclick="app.superAdminAccess()" class="bg-slate-800 hover:bg-slate-700 text-violet-400 px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-shield-halved mr-1"></i>Super Admin</button>
+                                </div>
+                            </div>
+                        </div>
+                        ` : ''}
+                        
+                        ${this.state.adminView === 'trash' ? this.renderTrashView() : ''}
+                        ${this.state.adminView === 'ops' ? this.renderOpsView() : ''}
+                        ${this.state.adminView === 'superadmin' ? this.renderSuperAdminView() : ''}
+                    </div>
+                </div>
+            `;
+            
+            setTimeout(() => {
+                const searchInput = document.getElementById('admin-search');
+                if (searchInput) {
+                    searchInput.addEventListener('input', (e) => {
+                        const query = e.target.value.toLowerCase();
+                        const rows = document.querySelectorAll('#diag-tbody tr');
+                        rows.forEach(row => {
+                            const text = row.textContent.toLowerCase();
+                            row.style.display = text.includes(query) ? '' : 'none';
+                        });
+                    });
+                }
+            }, 100);
+        },
+
+
+        // The full record-management console (search, quality filters, editable org,
+        // per-record PDF / retake / trash, distribute, scoped export, team report).
+        // Rendered ONLY inside the Ops Console, against an access-scoped record list.
+        renderDiagnosticBlock(list, ctx) {
+            return `
                         <div class="mb-6">
                             <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
                                 <h2 class="text-4xl font-black uppercase">
                                     <span class="text-white">Diagnostic </span>
                                     <span class="title-instinct">Console</span>
                                 </h2>
+                                ${ctx.scope === 'scoped' ? `<div class="text-[9px] text-teal-400 uppercase tracking-wider -mt-4 mb-2 w-full">Scoped to: ${ctx.companies.join(', ')}</div>` : `<div class="text-[9px] text-violet-400 uppercase tracking-wider -mt-4 mb-2 w-full">Full portfolio — all organisations</div>`}
                                 
                                 <div class="flex flex-wrap items-center gap-3">
                                     <div class="relative">
                                         <i class="fa-solid fa-search absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
                                         <input type="text" id="admin-search" placeholder="SEARCH BY EMAIL..." class="bg-slate-900/50 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-white text-xs outline-none focus:border-cyan-500 w-64">
                                     </div>
-                                    <button onclick="app.state.adminView='trash'; app.render();" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold uppercase flex items-center gap-2 transition">
-                                        <i class="fa-solid fa-trash"></i>
-                                        View Trash
-                                    </button>
-                                    <button onclick="app.openOpsView()" class="bg-slate-800 hover:bg-slate-700 text-teal-400 px-4 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-satellite-dish mr-1"></i>Ops Console</button>
-                                    <button onclick="app.superAdminAccess()" class="bg-slate-800 hover:bg-slate-700 text-violet-400 px-4 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-shield-halved mr-1"></i>Super Admin</button>
-                                </div>
+                                    </div>
                             </div>
                             
                             <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4">
@@ -1345,20 +1390,12 @@
                                         <i class="fa-solid fa-share-nodes"></i>
                                         Distribute
                                     </button>
-                                    <button onclick="app.exportCSV()" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-xs font-bold uppercase transition">Export CSV</button>
-                                    <button onclick="app.exportMasterCSV()" class="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 transition">
-                                        <i class="fa-solid fa-database"></i>
-                                        Master CSV (Psychometrics)
-                                    </button>
+                                    <button onclick="app.exportOpsCSV()" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-xs font-bold uppercase transition">Export CSV</button>
                                     <button onclick="app.showTeamReportModal()" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 transition">
                                         <i class="fa-solid fa-file-pdf"></i>
                                         Team Report
                                     </button>
-                                    <button onclick="app.resetSystem()" class="bg-rose-900/60 hover:bg-rose-900 text-rose-400 px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 transition">
-                                        <i class="fa-solid fa-rotate-left"></i>
-                                        Master Reset
-                                    </button>
-                                </div>
+                                    </div>
                             </div>
                         </div>
                         
@@ -1374,11 +1411,11 @@
                                         <th class="px-4 py-4 text-right">Actions</th>
                                     </tr>
                                 </thead>
-                                <tbody class="divide-y divide-white/5">
-                                    ${displayResponses.map((r, i) => {
+                                <tbody id="diag-tbody" class="divide-y divide-white/5">
+                                    ${list.map((r, i) => {
                                         const actualIndex = this.state.responses.indexOf(r);
-                                        const dt = new Date(dateKey(r));
-                                        const dateStr = dateKey(r) ? fmtDateTime(dt) : '—';
+                                        const dt = new Date(parseRecordDate(r));
+                                        const dateStr = parseRecordDate(r) ? fmtDateTime(dt) : '—';
                                         
                                         let qualityHtml = '';
                                         if (r.quality) {
@@ -1429,35 +1466,13 @@
                                     }).join('')}
                                 </tbody>
                             </table>
-                            ${filteredResponses.length === 0 ? `
+                            ${list.length === 0 ? `
                             <div class="text-center py-12 text-slate-500">
                                 <i class="fa-solid fa-inbox text-4xl mb-4 opacity-50"></i>
                                 <p>No records found matching the current filter.</p>
                             </div>
                             ` : ''}
-                        </div>
-                        ` : ''}
-                        
-                        ${this.state.adminView === 'trash' ? this.renderTrashView() : ''}
-                        ${this.state.adminView === 'ops' ? this.renderOpsView() : ''}
-                        ${this.state.adminView === 'superadmin' ? this.renderSuperAdminView() : ''}
-                    </div>
-                </div>
-            `;
-            
-            setTimeout(() => {
-                const searchInput = document.getElementById('admin-search');
-                if (searchInput) {
-                    searchInput.addEventListener('input', (e) => {
-                        const query = e.target.value.toLowerCase();
-                        const rows = document.querySelectorAll('tbody tr');
-                        rows.forEach(row => {
-                            const text = row.textContent.toLowerCase();
-                            row.style.display = text.includes(query) ? '' : 'none';
-                        });
-                    });
-                }
-            }, 100);
+                        </div>`;
         },
 
         renderSuperAdminView() {
@@ -1605,6 +1620,35 @@
                             ${dashCard('Expiring ≤ 30d', expiringSoon, 'fa-triangle-exclamation', 'text-amber-400', '')}
                             ${dashCard('Expired', expiredCount, 'fa-circle-xmark', 'text-rose-400', '')}
                         </div>
+                    </div>
+
+                    <!-- DATA ADMINISTRATION — FULL RIGHTS -->
+                    <div class="glass-card p-6 md:p-8 rounded-2xl border border-rose-500/20">
+                        <div class="text-[10px] text-slate-400 uppercase tracking-wider mb-1"><i class="fa-solid fa-user-shield text-rose-400 mr-2"></i>Data Administration — Full Rights</div>
+                        <p class="text-[9px] text-slate-500 mb-4">Complete, unrestricted control over every record in AIII. The full-portfolio Diagnostic Console covers all organisations; the Trash Bin restores or permanently removes records; the Master CSV is the complete psychometric dataset; Master Reset erases everything on this device. These powers exist only here, behind Super Admin authentication.</p>
+                        <div class="flex flex-wrap gap-3">
+                            <button onclick="app.openOpsAsSuperAdmin()" class="bg-teal-600 hover:bg-teal-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-satellite-dish mr-1"></i>Full Diagnostic Console (all organisations)</button>
+                            <button onclick="app.state.adminView='trash'; app.render();" class="bg-slate-800 hover:bg-slate-700 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-trash mr-1"></i>Trash Bin (${this.state.trash.length})</button>
+                            <button onclick="app.exportMasterCSV()" class="bg-purple-600 hover:bg-purple-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-database mr-1"></i>Master CSV (Psychometrics)</button>
+                            <button onclick="app.exportCSV()" class="bg-slate-800 hover:bg-slate-700 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition">Export CSV (all)</button>
+                            <button onclick="app.resetSystem()" class="bg-rose-900/60 hover:bg-rose-900 text-rose-400 px-5 py-2.5 rounded-xl text-xs font-bold uppercase transition"><i class="fa-solid fa-rotate-left mr-1"></i>Master Reset</button>
+                        </div>
+                    </div>
+
+                    <!-- SECURITY & PASSWORDS -->
+                    <div class="glass-card p-6 md:p-8 rounded-2xl border border-amber-500/20">
+                        <div class="text-[10px] text-slate-400 uppercase tracking-wider mb-1"><i class="fa-solid fa-key text-amber-400 mr-2"></i>Security &amp; Passwords</div>
+                        <p class="text-[9px] text-slate-500 mb-4">Change the confidential login passwords here. No email or OTP recovery exists by design: this authenticated Super Admin session is the recovery path. Changes apply on this device from the next login. Minimum 4 characters.</p>
+                        <div class="grid md:grid-cols-3 gap-4">
+                            ${[['pw-admin','Administrator password','app.changeAdminPassword()'],['pw-sa1','Super Admin password 1','app.changeSaPassword(1)'],['pw-sa2','Super Admin password 2','app.changeSaPassword(2)']].map(([id,label,fn]) => `
+                            <div class="bg-slate-900/40 border border-white/5 rounded-xl p-4">
+                                <div class="text-[9px] text-slate-400 uppercase tracking-wider mb-2">${label}</div>
+                                <input type="password" id="${id}-new" placeholder="New password" autocomplete="new-password" class="w-full bg-slate-950/50 border border-white/10 rounded-lg px-3 py-2 mb-2 text-white text-xs outline-none focus:border-amber-500">
+                                <input type="password" id="${id}-confirm" placeholder="Confirm new password" autocomplete="new-password" class="w-full bg-slate-950/50 border border-white/10 rounded-lg px-3 py-2 mb-2 text-white text-xs outline-none focus:border-amber-500" onkeydown="if(event.key==='Enter')${fn}">
+                                <button onclick="${fn}" class="w-full bg-amber-600 hover:bg-amber-500 text-white py-2 rounded-lg font-bold text-[10px] uppercase transition">Save</button>
+                            </div>`).join('')}
+                        </div>
+                        <button onclick="app.revertFactoryPasswords()" class="mt-4 bg-slate-800 hover:bg-slate-700 text-slate-400 px-4 py-2 rounded-xl text-[9px] font-bold uppercase transition">Revert all to factory defaults</button>
                     </div>
 
                     <!-- ORGANIZATION SETTINGS (COMPANY REGISTRY) -->
@@ -1785,7 +1829,7 @@
                             <h3 class="text-2xl font-black uppercase text-white">Trash Bin</h3>
                             <p class="text-sm text-slate-500 mt-1">Items automatically deleted after 30 days</p>
                         </div>
-                        <button onclick="app.state.adminView='responses'; app.render();" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase transition">
+                        <button onclick="app.state.adminView='superadmin'; app.render();" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase transition">
                             <i class="fa-solid fa-arrow-left mr-2"></i>Back to Responses
                         </button>
                     </div>
@@ -2027,7 +2071,40 @@
                         </div>
                     </div>
 
-                    <p class="text-[9px] text-slate-600 text-center">Read-only monitoring · data from the live response store · scope and access enforced per assigned-administrator licence records${v.type === 'scoped' ? ' · you see only your organisations' : ''}.</p>
+                    <!-- COMPANY-WISE LIVE RELIABILITY -->
+                    ${(() => {
+                        const alphaCompanies = (v.type === 'scoped') ? v.companies : this.getOrganizations();
+                        if (!alphaCompanies.length) return '';
+                        const sel = this.state.opsAlphaCompany && alphaCompanies.includes(this.state.opsAlphaCompany) ? this.state.opsAlphaCompany : alphaCompanies[0];
+                        const ca = this.opsCompanyAlphas(sel);
+                        return `
+                        <div class="glass-card p-6 rounded-2xl">
+                            <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
+                                <div class="text-[10px] text-slate-400 uppercase tracking-wider"><i class="fa-solid fa-chart-bar text-cyan-400 mr-2"></i>Live Reliability — Cronbach's α (per dimension) · company-wise</div>
+                                <select onchange="app.state.opsAlphaCompany=this.value; app.render();" class="bg-slate-950/50 border border-white/10 rounded-xl px-3 py-2 text-white text-xs outline-none focus:border-teal-500">
+                                    ${alphaCompanies.map(c => `<option value="${c}" ${c === sel ? 'selected' : ''}>${c}</option>`).join('')}
+                                </select>
+                            </div>
+                            ${ca.alphas ? `
+                            <div class="text-[9px] text-slate-500 mb-2">Computed live from ${ca.n} assessments for ${sel} · target α ≥ 0.70</div>
+                            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                                ${dimensionsData.map((d, i) => {
+                                    const a = ca.alphas[i];
+                                    const color = (a === null) ? 'text-slate-500' : (a >= 0.70 ? 'text-teal-400' : (a >= 0.50 ? 'text-amber-400' : 'text-rose-400'));
+                                    return `<div class="bg-slate-900/50 border border-white/5 rounded-xl px-3 py-2.5">
+                                        <div class="text-[8px] text-slate-500 uppercase tracking-wider truncate" title="${d.name}">D${i + 1} · ${d.name}</div>
+                                        <div class="text-lg font-black ${color}">${a === null ? 'NA' : a.toFixed(3)}</div>
+                                    </div>`;
+                                }).join('')}
+                            </div>` : `
+                            <p class="text-[10px] text-slate-500 mt-2">Cronbach's α for ${sel} requires a minimum of 2 completed assessments on this device (currently ${ca.n}). It activates automatically once the criterion is met.</p>`}
+                        </div>`;
+                    })()}
+
+                    <!-- RECORD MANAGEMENT: THE DIAGNOSTIC CONSOLE, ACCESS-SCOPED -->
+                    ${this.renderDiagnosticBlock(this.opsLocalDisplayList(), { scope: v.type === 'all' ? 'full' : 'scoped', companies: v.companies || [] })}
+
+                    <p class="text-[9px] text-slate-600 text-center">Live monitoring is read-only · record management operates on this device's stored records · scope and access enforced per assigned-administrator licence records${v.type === 'scoped' ? ' · you see only your organisations' : ''}.</p>
                 </div>`;
         },
 
@@ -2113,7 +2190,12 @@
         },
 
         showTeamReportModal() {
-            const orgs = this.getOrganizations();
+            let orgs = this.getOrganizations();
+            // Inside a scoped Ops Console session, only the viewer's own organisations are offered.
+            if (this.state.adminView === 'ops' && this.state.opsViewer && this.state.opsViewer.type === 'scoped') {
+                const co = {}; this.state.opsViewer.companies.forEach(c => co[c.toLowerCase()] = true);
+                orgs = orgs.filter(o => co[o.toLowerCase()]);
+            }
             if (orgs.length === 0) {
                 alert('No organizations found. Please ensure participants have organization data.');
                 return;
@@ -2613,6 +2695,43 @@
             };
             this.showSuperAdminLoginModal();
         },
+        forgotPasswordInfo() {
+            alert('Password recovery\n\nFor security, AIII does not use email or OTP resets.\n\n• The administrator password can be changed by the Super Admin under Super Admin → Security & Passwords.\n• If you have lost the administrator password, ask your Super Admin (system owner) to set a new one.\n• Super Admin passwords can only be changed from within an authenticated Super Admin session — keep them safe.');
+        },
+        _readNewPassword(idPrefix, label) {
+            const p1 = (document.getElementById(idPrefix + '-new')?.value || '');
+            const p2 = (document.getElementById(idPrefix + '-confirm')?.value || '');
+            if (p1.length < 4) { alert(label + ': the new password must be at least 4 characters.'); return null; }
+            if (p1 !== p2) { alert(label + ': the two entries do not match.'); return null; }
+            return p1;
+        },
+        changeAdminPassword() {
+            const p = this._readNewPassword('pw-admin', 'Administrator password');
+            if (p === null) return;
+            localStorage.setItem('ai_instinct_pw_admin', p);
+            document.getElementById('pw-admin-new').value = ''; document.getElementById('pw-admin-confirm').value = '';
+            alert('Administrator password updated. It takes effect from the next login on this device.');
+        },
+        changeSaPassword(which) {
+            const p = this._readNewPassword('pw-sa' + which, 'Super Admin password ' + which);
+            if (p === null) return;
+            localStorage.setItem('ai_instinct_pw_sa' + which, p);
+            document.getElementById('pw-sa' + which + '-new').value = ''; document.getElementById('pw-sa' + which + '-confirm').value = '';
+            alert('Super Admin password ' + which + ' updated. Both Super Admin passwords are required at the next entry.');
+        },
+        revertFactoryPasswords() {
+            if (!confirm('Revert ALL passwords (administrator + both Super Admin) to their factory defaults on this device?')) return;
+            localStorage.removeItem('ai_instinct_pw_admin');
+            localStorage.removeItem('ai_instinct_pw_sa1');
+            localStorage.removeItem('ai_instinct_pw_sa2');
+            alert('All passwords reverted to factory defaults.');
+        },
+        // Super Admin full-rights path into the record console (no extra gate needed;
+        // the Super Admin session itself is the authentication).
+        openOpsAsSuperAdmin() {
+            this.state.opsViewer = { type: 'all', email: '(Super Admin)', companies: [], licenceIds: [] };
+            this.openOpsView();
+        },
         opsSignOutViewer() {
             this.state.opsViewer = null;
             this.state.opsData = null; this.state.opsError = ''; this.state.opsLastFetch = null;
@@ -2741,6 +2860,52 @@
             const spanDays = times.length ? Math.max(1, Math.ceil((Math.max(...times) - Math.min(...times)) / 864e5)) : 1;
             const dailyAvg = rows.length / spanDays;
             return { completed: rows.length, today, avg, avgMin, orgs, countries, qualityPass, bands, dimAvgs, seats, rate, dailyAvg };
+        },
+        // Local (this-device) records visible to the current ops viewer.
+        opsScopedLocal(list) {
+            const v = this.state.opsViewer;
+            if (!v) return [];
+            if (v.type === 'all') return list;
+            const co = {}; v.companies.forEach(c => co[c.toLowerCase()] = true);
+            const li = {}; v.licenceIds.forEach(x => li[x] = true);
+            return list.filter(r => r && r.user && (li[r.user.licenceId] || co[(r.user.organization || '').toLowerCase()]));
+        },
+        // Filter (ALL/QUALITY/SUSPECT/RELIABILITY) + scope + date sort, for the
+        // Diagnostic Console block hosted inside the Ops Console.
+        opsLocalDisplayList() {
+            const filtered = this.opsScopedLocal(this.filterResponses());
+            if (!this.state.dateSortDir) return filtered;
+            const k = r => parseRecordDate(r);
+            return [...filtered].sort((a, b) => this.state.dateSortDir === 'asc' ? k(a) - k(b) : k(b) - k(a));
+        },
+        // Canonical CSV restricted to the viewer's scope (Master CSV remains Super Admin only).
+        exportOpsCSV() {
+            const rows = this.opsScopedLocal(this.state.responses);
+            const csv = this._buildCanonicalCSVFrom(rows);
+            if (csv) this._downloadCSV(csv, `AI_Master_Data_${fmtDateFile()}.csv`);
+        },
+        // Company-wise live Cronbach's alpha from local answer vectors.
+        opsCompanyAlphas(company) {
+            // Strict email-domain restriction: when the company has a registered domain,
+            // only records whose respondent email carries that exact domain are included.
+            // (Name-match fallback applies only where no domain is registered.)
+            const regDomain = this.getOrgDomain(company);
+            const recs = this.state.responses.filter(r => {
+                if (!r || !r.user) return false;
+                if (regDomain) {
+                    const dom = String(r.user.email || '').toLowerCase().split('@')[1] || '';
+                    return dom === regDomain;
+                }
+                return (r.user.organization || '') === company;
+            });
+            if (recs.length < 2) return { n: recs.length, alphas: null };
+            const alphas = dimensionsData.map((d, dIdx) => {
+                try {
+                    const a = this.computeCronbachAlphaForDimension(dIdx, recs);
+                    return (a === null || isNaN(a)) ? null : Number(a.toFixed(3));
+                } catch (e) { return null; }
+            });
+            return { n: recs.length, alphas };
         },
         opsAlerts(st) {
             const alerts = [];
@@ -2933,7 +3098,7 @@
             window.scrollTo({ top: 0, behavior: 'smooth' });
         },
 
-        login() { const v = document.getElementById('admin-p'); if (v && v.value === CONFIG.ADMIN_PASS) { this.state.isAdmin = true; this.state.adminView = 'responses'; this.navigate('admin'); } else alert('Invalid Credentials'); },
+        login() { const v = document.getElementById('admin-p'); if (v && v.value === getAdminPass()) { this.state.isAdmin = true; this.state.adminView = 'responses'; this.navigate('admin'); } else alert('Invalid Credentials'); },
 
         logout() { this.stopOpsPolling(); this.state.opsViewer = null; this.state.opsData = null; this.state.isAdmin = false; this.state.isSuperAdmin = false; this.state.adminView = 'responses'; this.navigate('hero'); },
 
@@ -2984,7 +3149,7 @@
         submitSuperAdminLogin() {
             const p1 = (document.getElementById('sa-pass-1')?.value || '').trim();
             const p2 = (document.getElementById('sa-pass-2')?.value || '').trim();
-            if (p1 !== SUPER_ADMIN_PASS_1 || p2 !== SUPER_ADMIN_PASS_2) {
+            if (p1 !== getSaPass1() || p2 !== getSaPass2()) {
                 const err = document.getElementById('sa-login-error');
                 if (err) err.style.display = 'block';
                 const f1 = document.getElementById('sa-pass-1');
@@ -3904,6 +4069,9 @@
             return chartInstance;
         },
 
+        // Single delivery point for every generated PDF (overridable in tests).
+        _pdfDeliver(doc, filename) { doc.save(filename); },
+
         async generatePDF(record) {
             const { jsPDF } = window.jspdf;
             const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
@@ -3919,9 +4087,25 @@
                 cyan500: [6, 182, 212],
                 teal500: [20, 184, 166],
                 rose500: [244, 63, 94],
+                violet: [109, 40, 217],
+                amber: [217, 119, 6],
                 white: [255, 255, 255],
                 cardBg: [250, 250, 250],
                 grayBg: [235, 237, 240] 
+            };
+            // Elegant twin accent rule — violet (premium/wisdom) flowing into cyan (clarity)
+            const accentRule = (x, y, w) => {
+                doc.setLineWidth(0.9);
+                doc.setDrawColor(...colors.violet); doc.line(x, y, x + w * 0.62, y);
+                doc.setDrawColor(...colors.cyan500); doc.line(x + w * 0.62 + 1.6, y, x + w, y);
+                doc.setLineWidth(0.2);
+            };
+            const scoreBar = (x, y, w, h, pct, color) => {
+                doc.setFillColor(...colors.slate100);
+                doc.roundedRect(x, y, w, h, h / 2, h / 2, 'F');
+                const fw = Math.max(h, Math.min(w, w * (pct || 0) / 100));
+                doc.setFillColor(...color);
+                doc.roundedRect(x, y, fw, h, h / 2, h / 2, 'F');
             };
 
             const layout = { margin: 15, width: 210, height: 297, contentW: 180, lineH: 5 };
@@ -3952,6 +4136,7 @@
                 setFont('normal', 10, colors.cyan500);
                 const pageInfo = `Page ${doc.internal.getNumberOfPages()}`;
                 doc.text(pageInfo, layout.width - layout.margin, 14, { align: 'right' });
+                accentRule(0, 20.6, layout.width);
             };
 
             const addFooter = () => {
@@ -3959,6 +4144,11 @@
                 for (let i = 1; i <= totalPages; i++) {
                     doc.setPage(i);
                     if (i === 1) continue;
+                    doc.setDrawColor(...colors.slate100); doc.setLineWidth(0.4);
+                    doc.line(layout.margin, layout.height - 13.5, layout.width - layout.margin, layout.height - 13.5);
+                    doc.setDrawColor(...colors.violet); doc.setLineWidth(0.9);
+                    doc.line(layout.margin, layout.height - 13.5, layout.margin + 22, layout.height - 13.5);
+                    doc.setLineWidth(0.2);
                     setFont('normal', 8, colors.slate500);
                     doc.text('AI INSTINCT INDEX® - 11 Dimensions Behavioural Readiness Assessment I sreejith@futureowork.com', layout.margin, layout.height - 10);
                     doc.text(`Page ${i}`, layout.width - layout.margin, layout.height - 10, { align: 'right' });
@@ -3982,10 +4172,15 @@
             doc.setFillColor(...colors.slate800);
             doc.circle(-20, layout.height - 50, 60, 'F');
 
-            let y = 80;
+            // Premium vertical brand band + twin accents (violet = wisdom, cyan = clarity)
+            doc.setFillColor(...colors.violet); doc.rect(0, 0, 2.6, layout.height, 'F');
+            doc.setFillColor(...colors.cyan500); doc.rect(2.6, 0, 0.9, layout.height, 'F');
+
+            let y = 74;
             setFont('bold', 12, colors.cyan500);
             doc.text('BEHAVIORAL DIAGNOSTIC REPORT', layout.margin, y, null, null, "left");
-            y += 15;
+            accentRule(layout.margin, y + 3.4, 78);
+            y += 21;
             setFont('bold', 42, colors.white);
             doc.text('AI INSTINCT', layout.margin, y);
             y += 15;
@@ -4021,6 +4216,7 @@
             doc.text('OVERALL READINESS', layout.margin + scoreSize, y + (scoreSize*2) + 12, {align: 'center'});
             
             const footerY = layout.height - 15;
+            accentRule(layout.margin, footerY - 7, layout.contentW);
             setFont('normal', 10, colors.slate400);
             doc.text(formatDate(new Date()), layout.width - layout.margin, footerY, { align: 'right' });
             setFont('bold', 9, colors.slate500);
@@ -4032,6 +4228,7 @@
             y = 35;
             setFont('bold', 16, colors.slate900);
             doc.text('EXECUTIVE SUMMARY', layout.margin, y);
+            accentRule(layout.margin, y + 2.6, 62);
             y += 10;
             setFont('bold', 11, colors.slate800);
             doc.text("This is not a judgment of performance. It is a diagnostic for readiness.", layout.margin, y);
@@ -4169,6 +4366,7 @@
             y = 35;
             setFont('bold', 16, colors.slate900);
             doc.text('DETAILED ANALYSIS', layout.margin, y);
+            accentRule(layout.margin, y + 2.6, 62);
             y += 14;
 
             record.scores.forEach((s, i) => {
@@ -4216,8 +4414,8 @@
                 const adjText = (typeof s.adjusted !== 'undefined' && s.adjusted !== null) ? (s.adjusted + '%') : 'N/A';
                 const nText = (typeof s.nAnswered !== 'undefined') ? s.nAnswered : '—';
                 doc.text(`Raw: ${rawText}  |  Adj: ${adjText}  |  n=${nText}`, layout.margin + 4, contentY);
-                
-                contentY += 8;
+                scoreBar(layout.margin + 4, contentY + 2.2, layout.contentW - 34, 2.4, (typeof s.score === 'number' ? s.score : 0), scoreCol);
+                contentY += 10;
 
                 const leftX = layout.margin + 4;
                 const rightX = layout.width / 2 + 4;
@@ -4268,6 +4466,7 @@
             const thW = doc.getTextWidth('AI INSTINCT INDEX - TREND');
             doc.setFontSize(9); doc.setTextColor(6, 182, 212);
             doc.text('®', layout.margin + thW + 0.5, y - 4);
+            accentRule(layout.margin, y + 2.6, 86);
             y += 10;
             
             try {
@@ -4294,6 +4493,7 @@
             
             setFont('bold', 20, colors.slate900);
             doc.text('SCORING NOTE', layout.margin, y);
+            accentRule(layout.margin, y + 2.6, 52);
             y += 15;
 
             setFont('bold', 11, colors.teal500);
@@ -4402,6 +4602,7 @@
             y = 35;
             setFont('bold', 20, colors.slate900);
             doc.text('METHODOLOGY NOTE', layout.margin, y);
+            accentRule(layout.margin, y + 2.6, 72);
             y += 15;
 
             const methodIntro = "This short note is written to be concise and transparent so respondents understand how scores are derived and why adjustments increase reliability.";
@@ -4466,6 +4667,7 @@
             y = 35;
             setFont('bold', 16, colors.slate900);
             doc.text('APPENDIX: DIMENSION DEFINITIONS', layout.margin, y);
+            accentRule(layout.margin, y + 2.6, 96);
             y += 18;
 
             GLOSSARY_CONTENT.forEach(item => {
@@ -4489,7 +4691,7 @@
             addFooter();
 
             const filename = `AI_Instinct_Report_${record.user.name.replace(/\s+/g,'_')}.pdf`;
-            doc.save(filename);
+            this._pdfDeliver(doc, filename);
         },
 
         adminIndivDownload(idx) { this.generatePDF(this.state.responses[idx]); },
@@ -4571,10 +4773,26 @@
                     cyan500: [6, 182, 212],
                     teal500: [20, 184, 166],
                     rose500: [244, 63, 94],
+                    violet: [109, 40, 217],
+                    amber: [217, 119, 6],
                     white: [255, 255, 255],
                     cardBg: [250, 250, 250]
                 };
                 const layout = { margin: 15, width: 210, height: 297, contentW: 180 };
+                const accentRule = (x, yy, w) => {
+                    doc.setLineWidth(0.9);
+                    doc.setDrawColor(...colors.violet); doc.line(x, yy, x + w * 0.62, yy);
+                    doc.setDrawColor(...colors.cyan500); doc.line(x + w * 0.62 + 1.6, yy, x + w, yy);
+                    doc.setLineWidth(0.2);
+                };
+                const scoreBar = (x, yy, w, h, pct, color) => {
+                    doc.setFillColor(...colors.slate100);
+                    doc.roundedRect(x, yy, w, h, h / 2, h / 2, 'F');
+                    const fw = Math.max(h, Math.min(w, w * (pct || 0) / 100));
+                    doc.setFillColor(...color);
+                    doc.roundedRect(x, yy, fw, h, h / 2, h / 2, 'F');
+                };
+                const bandOf = v => v >= 75 ? ['STRONG', colors.teal500] : (v >= 50 ? ['MODERATE', colors.cyan500] : ['EMERGING', colors.rose500]);
 
                 const formatDate = (date) => fmtDateTime(date); // v13: global DD Mmm YYYY HH:MM standard
 
@@ -4593,6 +4811,7 @@
                     doc.setFontSize(7); doc.text('®', layout.margin + w + 0.5, 11);
                     setFont('normal', 10, colors.cyan500);
                     doc.text(`Page ${doc.internal.getNumberOfPages()}`, layout.width - layout.margin, 14, { align: 'right' });
+                    accentRule(0, 20.6, layout.width);
                 };
 
                 const addFooter = () => {
@@ -4600,6 +4819,11 @@
                     for (let i = 1; i <= totalPages; i++) {
                         doc.setPage(i);
                         if (i === 1) continue;
+                        doc.setDrawColor(...colors.slate100); doc.setLineWidth(0.4);
+                        doc.line(layout.margin, layout.height - 13.5, layout.width - layout.margin, layout.height - 13.5);
+                        doc.setDrawColor(...colors.violet); doc.setLineWidth(0.9);
+                        doc.line(layout.margin, layout.height - 13.5, layout.margin + 22, layout.height - 13.5);
+                        doc.setLineWidth(0.2);
                         setFont('normal', 8, colors.slate500);
                         doc.text('AI INSTINCT INDEX® - 11 Dimensions Behavioural Readiness Assessment I sreejith@futureowork.com', layout.margin, layout.height - 10);
                         doc.text(`Page ${i}`, layout.width - layout.margin, layout.height - 10, { align: 'right' });
@@ -4614,10 +4838,14 @@
                 doc.circle(layout.width + 20, 50, 80, 'S');
                 doc.circle(layout.width + 20, 50, 70, 'S');
                 
-                let y = 80;
+                doc.setFillColor(...colors.violet); doc.rect(0, 0, 2.6, layout.height, 'F');
+                doc.setFillColor(...colors.cyan500); doc.rect(2.6, 0, 0.9, layout.height, 'F');
+
+                let y = 74;
                 setFont('bold', 12, colors.cyan500);
                 doc.text('TEAM AGGREGATE REPORT', layout.margin, y);
-                y += 15;
+                accentRule(layout.margin, y + 3.4, 70);
+                y += 21;
                 setFont('bold', 42, colors.white);
                 doc.text('AI INSTINCT', layout.margin, y);
                 y += 15;
@@ -4638,6 +4866,11 @@
                 y += 8;
                 setFont('normal', 11, colors.cyan500);
                 doc.text(`${teamCount} Participants Included`, layout.margin, y);
+                const tTimes = responses.map(r => parseRecordDate(r)).filter(t => t > 0);
+                if (tTimes.length) {
+                    setFont('normal', 9, colors.slate500);
+                    doc.text(`Assessment window: ${fmtDate(new Date(Math.min(...tTimes)))} — ${fmtDate(new Date(Math.max(...tTimes)))}`, layout.margin, y + 6);
+                }
 
                 y += 40;
                 const scoreSize = 30;
@@ -4649,8 +4882,11 @@
                 doc.text(`${avgOverall}%`, layout.margin + scoreSize, y + scoreSize + 3, {align: 'center'});
                 setFont('bold', 10, colors.slate500);
                 doc.text('TEAM MEAN READINESS', layout.margin + scoreSize, y + (scoreSize*2) + 12, {align: 'center'});
+                accentRule(layout.margin, layout.height - 22, layout.contentW);
                 setFont('normal', 10, colors.slate400);
                 doc.text(formatDate(new Date()), layout.width - layout.margin, layout.height - 15, { align: 'right' });
+                setFont('bold', 9, colors.slate500);
+                doc.text('11 Dimensions Behavioural Readiness Assessment I Future of Work AI Labs', layout.margin, layout.height - 15);
 
                 // --- PAGE 2: ABOUT THE AI INSTINCT INDEX ---
                 doc.addPage();
@@ -4665,9 +4901,7 @@
                 setFont('bold', 20, colors.slate900);
                 doc.text('What the AI Instinct Index Measures', layout.margin, y);
                 y += 4;
-                doc.setDrawColor(...colors.cyan500);
-                doc.setLineWidth(0.7);
-                doc.line(layout.margin, y, layout.margin + 115, y);
+                accentRule(layout.margin, y, 115);
                 y += 7;
 
                 // Intro paragraph (9pt, tight line spacing)
@@ -4839,6 +5073,7 @@
                 y = 35;
                 setFont('bold', 16, colors.slate900);
                 doc.text('TEAM PROFILE ANALYSIS', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 74);
                 y += 10;
                 setFont('bold', 11, colors.slate800);
                 doc.text("Aggregated behavioral profile of the selected group.", layout.margin, y);
@@ -4848,36 +5083,20 @@
                 
                 y += 10;
                 console.log('5. Generating radar chart...');
-                
-                console.log('   5a. Checking drawRadar function:', typeof self.drawRadar);
-                if (!self.drawRadar) {
-                    throw new Error('drawRadar function not available on app object');
-                }
-                
-                console.log('   5b. Checking canvas element...');
-                const canvas = document.getElementById('radar-canvas');
-                if (!canvas) {
-                    throw new Error('radar-canvas element not found in DOM');
-                }
-                console.log('   5c. Canvas found:', canvas.id, canvas.width, canvas.height);
-                
-                console.log('   5d. Calling drawRadar...');
-                self.drawRadar('radar-canvas', teamScores, true);
-                
-                console.log('   5e. Waiting for chart render (600ms)...');
-                await new Promise(r => setTimeout(r, 600));
-                
-                console.log('   5f. Converting canvas to image...');
-                const img = canvas.toDataURL('image/png');
-                if (!img || img === 'data:,') {
-                    throw new Error('Canvas toDataURL() returned empty image');
-                }
-                
-                const imgSize = 110;
-                const xPos = (layout.width - imgSize) / 2;
-                doc.addImage(img, 'PNG', xPos, y, imgSize, imgSize);
-                y += imgSize + 5;
-                console.log('   5g. Radar chart added to PDF successfully');
+                try {
+                    const canvas = document.getElementById('radar-canvas');
+                    if (self.drawRadar && canvas) {
+                        self.drawRadar('radar-canvas', teamScores, true);
+                        await new Promise(r => setTimeout(r, 600));
+                        const img = canvas.toDataURL('image/png');
+                        if (img && img !== 'data:,') {
+                            const imgSize = 110;
+                            const xPos = (layout.width - imgSize) / 2;
+                            doc.addImage(img, 'PNG', xPos, y, imgSize, imgSize);
+                            y += imgSize + 5;
+                        } else { y += 6; }
+                    } else { y += 6; }
+                } catch (chartErr) { console.error('Radar chart skipped:', chartErr); y += 6; }
 
                 const sorted = [...teamScores].sort((a,b) => b.score - a.score);
                 const top3 = sorted.slice(0, 3);
@@ -4908,12 +5127,299 @@
                 }
 
 
+                // === EXECUTIVE SUMMARY (participation, distribution, headline reads) ===
+                doc.addPage();
+                addHeader();
+                y = 30;
+                setFont('bold', 16, colors.slate900);
+                doc.text('EXECUTIVE SUMMARY', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 66);
+                y += 12;
+
+                const esBands = { s: 0, m: 0, e: 0 };
+                responses.forEach(r => {
+                    const ov = Number(r.overall) || 0;
+                    if (ov >= 75) esBands.s++; else if (ov >= 50) esBands.m++; else esBands.e++;
+                });
+                const esFlagged = responses.filter(r => r.quality && (r.quality.tooFast || r.quality.straightline || r.quality.insufficientOverall)).length;
+                const esDurations = responses.map(r => (Date.parse(r.completedAtIso) - Date.parse(r.startedAtIso)) / 60000).filter(x => x > 0 && isFinite(x));
+                const esAvgMin = esDurations.length ? (esDurations.reduce((a, b) => a + b, 0) / esDurations.length) : null;
+                const esSorted = [...teamScores].filter(t => t.name !== 'Attention Check').sort((a, b) => b.score - a.score);
+
+                // Participation stat cards (four across)
+                const esCards = [
+                    ['PARTICIPANTS', String(teamCount), colors.violet],
+                    ['TEAM MEAN', avgOverall + '%', bandOf(avgOverall)[1]],
+                    ['AVG DURATION', esAvgMin === null ? '\u2014' : esAvgMin.toFixed(1) + ' min', colors.cyan500],
+                    ['QUALITY-FLAGGED', esFlagged + ' of ' + teamCount, esFlagged ? colors.amber : colors.teal500],
+                ];
+                const esCardW = (layout.contentW - 12) / 4;
+                esCards.forEach((c, i) => {
+                    const cx = layout.margin + i * (esCardW + 4);
+                    doc.setFillColor(...colors.cardBg);
+                    doc.roundedRect(cx, y, esCardW, 22, 2, 2, 'F');
+                    doc.setFillColor(...c[2]);
+                    doc.rect(cx, y, esCardW, 1.6, 'F');
+                    setFont('bold', 6.5, colors.slate500);
+                    doc.text(c[0], cx + 3, y + 7);
+                    setFont('bold', 13, colors.slate900);
+                    doc.text(c[1], cx + 3, y + 16);
+                });
+                y += 30;
+
+                // Readiness distribution with elegant bars
+                setFont('bold', 11, colors.slate900);
+                doc.text('READINESS DISTRIBUTION', layout.margin, y);
+                accentRule(layout.margin, y + 2.2, 52);
+                y += 9;
+                [['STRONG (\u226575%)', esBands.s, colors.teal500], ['MODERATE (50\u201374%)', esBands.m, colors.cyan500], ['EMERGING (<50%)', esBands.e, colors.rose500]].forEach(b => {
+                    setFont('bold', 8.5, colors.slate700);
+                    doc.text(b[0], layout.margin, y + 3);
+                    scoreBar(layout.margin + 44, y, layout.contentW - 62, 4.2, teamCount ? (b[1] / teamCount * 100) : 0, b[2]);
+                    setFont('bold', 9, b[2]);
+                    doc.text(String(b[1]), layout.width - layout.margin - 10, y + 3.4);
+                    y += 9;
+                });
+                y += 4;
+
+                // Headline reads
+                setFont('bold', 11, colors.slate900);
+                doc.text('HEADLINE READS', layout.margin, y);
+                accentRule(layout.margin, y + 2.2, 40);
+                y += 9;
+                const esReads = [];
+                if (esSorted.length) {
+                    esReads.push('Strongest behavioural condition: ' + esSorted[0].name + ' at ' + esSorted[0].score + '% \u2014 a natural acceleration point to protect and leverage.');
+                    esReads.push('Priority development area: ' + esSorted[esSorted.length - 1].name + ' at ' + esSorted[esSorted.length - 1].score + '% \u2014 the highest-leverage focus for leadership intervention.');
+                }
+                esReads.push('Overall classification: ' + bandOf(avgOverall)[0] + ' (' + avgOverall + '%). ' + (avgOverall >= 75 ? 'Behavioural conditions broadly support sustainable AI adoption.' : (avgOverall >= 50 ? 'Foundational readiness exists but is unevenly distributed across dimensions.' : 'Significant behavioural gaps risk stalling AI initiatives; prioritise the foundations below.')));
+                if (esFlagged) esReads.push(esFlagged + ' response(s) carry data-quality flags and are detailed in the Reliability & Data Quality section; interpret affected figures with care.');
+                esReads.forEach(t => {
+                    doc.setFillColor(...colors.violet);
+                    doc.circle(layout.margin + 2, y - 1, 1.3, 'F');
+                    setFont('normal', 9, colors.slate700);
+                    const rl = doc.splitTextToSize(t, layout.contentW - 10);
+                    doc.text(rl, layout.margin + 6, y);
+                    y += rl.length * 4.6 + 3;
+                });
+
+                // === DIMENSION DEEP DIVE (all 11, with science + team guidance) ===
+                doc.addPage();
+                addHeader();
+                y = 30;
+                setFont('bold', 16, colors.slate900);
+                doc.text('DIMENSION DEEP DIVE', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 72);
+                y += 6;
+                setFont('normal', 8.5, colors.slate500);
+                doc.text('Team average, spread across participants, scientific context, and development guidance for each dimension.', layout.margin, y + 4);
+                y += 12;
+
+                const ddDims = dimensionsData.filter(dm => dm.name !== 'Attention Check');
+                ddDims.forEach((dim, di) => {
+                    const teamAvgD = (teamScores.find(t => t.name === dim.name) || {}).score || 0;
+                    const per = responses.map(r => (r.scores || []).find(sc => sc.name === dim.name)).filter(sc => sc && typeof sc.score === 'number').map(sc => sc.score);
+                    const dMin = per.length ? Math.min(...per) : null;
+                    const dMax = per.length ? Math.max(...per) : null;
+                    const [dBand, dCol] = bandOf(teamAvgD);
+                    const dimIdx = dimensionsData.indexOf(dim);
+                    const guide = self.getSuggestions(dimIdx, teamAvgD, dim.name).slice(0, 2);
+
+                    // Measure box height
+                    const sciLines = doc.splitTextToSize(dim.scientific || '', (layout.contentW / 2) - 14);
+                    const devLines = doc.splitTextToSize(dim.dev || '', (layout.contentW / 2) - 14);
+                    const guideLines = guide.map(g => doc.splitTextToSize(g, layout.contentW - 18));
+                    const guideH = guideLines.reduce((a, gl) => a + gl.length * 3.9 + 2, 0);
+                    const boxH = 24 + Math.max(sciLines.length, devLines.length) * 3.9 + 8 + guideH + 6;
+
+                    if (y + boxH > layout.height - 22) { doc.addPage(); addHeader(); y = 30; }
+
+                    const bx = layout.margin, by = y;
+                    doc.setDrawColor(...colors.slate100);
+                    doc.roundedRect(bx, by, layout.contentW, boxH, 2.5, 2.5, 'S');
+                    doc.setFillColor(...dCol);
+                    doc.rect(bx, by, 1.8, boxH, 'F');
+
+                    setFont('bold', 10.5, colors.slate900);
+                    doc.text('D' + (di + 1) + ' \u00b7 ' + dim.name.toUpperCase(), bx + 5, by + 7);
+                    doc.setFillColor(...dCol);
+                    doc.roundedRect(layout.width - layout.margin - 21, by + 3, 17, 8, 2, 2, 'F');
+                    setFont('bold', 8.5, colors.white);
+                    doc.text(teamAvgD + '%', layout.width - layout.margin - 12.5, by + 8.3, { align: 'center' });
+                    setFont('bold', 7.5, dCol);
+                    doc.text(dBand, layout.width - layout.margin - 25, by + 8.3, { align: 'right' });
+
+                    scoreBar(bx + 5, by + 10.5, layout.contentW - 34, 2.2, teamAvgD, dCol);
+                    setFont('normal', 7, colors.slate500);
+                    doc.text('Team range: ' + (dMin === null ? '\u2014' : dMin + '%\u2013' + dMax + '%') + '  \u00b7  n=' + per.length + (dMax !== null && (dMax - dMin) >= 35 ? '  \u00b7  wide spread \u2014 alignment opportunity' : ''), bx + 5, by + 17);
+
+                    const cy0 = by + 22;
+                    setFont('bold', 7.5, colors.violet);
+                    doc.text('SCIENTIFIC CONTEXT', bx + 5, cy0);
+                    setFont('normal', 7.3, colors.slate700);
+                    doc.text(sciLines, bx + 5, cy0 + 4);
+                    setFont('bold', 7.5, colors.violet);
+                    doc.text('TRANSFORMATION GUIDANCE', layout.width / 2 + 3, cy0);
+                    setFont('normal', 7.3, colors.slate700);
+                    doc.text(devLines, layout.width / 2 + 3, cy0 + 4);
+
+                    let gy = cy0 + Math.max(sciLines.length, devLines.length) * 3.9 + 7;
+                    setFont('bold', 7.5, colors.slate900);
+                    doc.text('TEAM DEVELOPMENT FOCUS', bx + 5, gy);
+                    gy += 4.5;
+                    guideLines.forEach(gl => {
+                        doc.setFillColor(...colors.cyan500);
+                        doc.circle(bx + 7, gy - 1, 1.1, 'F');
+                        setFont('normal', 7.3, colors.slate700);
+                        doc.text(gl, bx + 11, gy);
+                        gy += gl.length * 3.9 + 2;
+                    });
+
+                    y = by + boxH + 6;
+                });
+
+                // === RELIABILITY & DATA QUALITY ===
+                doc.addPage();
+                addHeader();
+                y = 30;
+                setFont('bold', 16, colors.slate900);
+                doc.text('RELIABILITY & DATA QUALITY', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 92);
+                y += 12;
+
+                setFont('bold', 11, colors.slate900);
+                doc.text("INTERNAL CONSISTENCY \u2014 CRONBACH'S \u03b1 (THIS GROUP)", layout.margin, y);
+                y += 5;
+                setFont('normal', 8, colors.slate500);
+                doc.text('Computed from this group\u2019s answer vectors. Target \u03b1 \u2265 0.70; NA = not computable from available items.', layout.margin, y);
+                y += 7;
+                const relCols = 2, relW = (layout.contentW - 6) / relCols;
+                ddDims.forEach((dim, di) => {
+                    const dimIdx = dimensionsData.indexOf(dim);
+                    let aVal = null;
+                    try { const a = self.computeCronbachAlphaForDimension(dimIdx, responses); aVal = (a === null || isNaN(a)) ? null : Number(a.toFixed(3)); } catch (e) {}
+                    const cx = layout.margin + (di % relCols) * (relW + 6);
+                    const cyy = y + Math.floor(di / relCols) * 8;
+                    const aCol = aVal === null ? colors.slate400 : (aVal >= 0.70 ? colors.teal500 : (aVal >= 0.50 ? colors.amber : colors.rose500));
+                    setFont('normal', 8, colors.slate700);
+                    doc.text('D' + (di + 1) + ' ' + dim.name, cx, cyy);
+                    setFont('bold', 8.5, aCol);
+                    doc.text(aVal === null ? 'NA' : aVal.toFixed(3), cx + relW - 12, cyy, { align: 'right' });
+                    doc.setDrawColor(...colors.slate100); doc.setLineWidth(0.3);
+                    doc.line(cx, cyy + 1.6, cx + relW - 12, cyy + 1.6);
+                });
+                y += Math.ceil(ddDims.length / relCols) * 8 + 8;
+
+                setFont('bold', 11, colors.slate900);
+                doc.text('RESPONSE QUALITY SCREENING', layout.margin, y);
+                accentRule(layout.margin, y + 2.2, 62);
+                y += 9;
+                const qTooFast = responses.filter(r => r.quality && r.quality.tooFast).length;
+                const qStraight = responses.filter(r => r.quality && r.quality.straightline).length;
+                const qInsuff = responses.filter(r => r.quality && r.quality.insufficientOverall).length;
+                [['Completed faster than the reflective-response threshold (<120s)', qTooFast],
+                 ['Straight-line answering detected (\u226510 consecutive identical responses)', qStraight],
+                 ['Insufficient completion (<50% of items answered)', qInsuff]].forEach(q => {
+                    const qc = q[1] ? colors.amber : colors.teal500;
+                    doc.setFillColor(...qc); doc.circle(layout.margin + 2, y - 1, 1.3, 'F');
+                    setFont('normal', 8.5, colors.slate700);
+                    doc.text(q[0], layout.margin + 6, y);
+                    setFont('bold', 9, qc);
+                    doc.text(q[1] + ' of ' + teamCount, layout.width - layout.margin, y, { align: 'right' });
+                    y += 7;
+                });
+                y += 4;
+                doc.setFillColor(245, 243, 255);
+                doc.setDrawColor(...colors.violet); doc.setLineWidth(0.4);
+                doc.roundedRect(layout.margin, y, layout.contentW, 16, 2.5, 2.5, 'FD');
+                setFont('bold', 8.5, colors.violet);
+                doc.text('ANONYMITY PROTECTION', layout.margin + 4, y + 6);
+                setFont('normal', 8, colors.slate700);
+                doc.text('Group reporting requires a minimum of ' + MIN_REPORT_GROUP + ' respondents; this report covers ' + teamCount + '. Individual answers are never identifiable from the aggregates presented here.', layout.margin + 4, y + 11.5, { maxWidth: layout.contentW - 8 });
+                y += 22;
+
+                // === METHODOLOGY & REPORTING CONVENTIONS ===
+                doc.addPage();
+                addHeader();
+                y = 30;
+                setFont('bold', 16, colors.slate900);
+                doc.text('METHODOLOGY & REPORTING CONVENTIONS', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 132);
+                y += 12;
+
+                setFont('normal', 9, colors.slate700);
+                const mcIntro = 'To ensure clarity and scientific rigour, the report presents both the observed measure and the statistically adjusted score. The following are presented for each dimension:';
+                const mcIntroL = doc.splitTextToSize(mcIntro, layout.contentW);
+                doc.text(mcIntroL, layout.margin, y);
+                y += mcIntroL.length * 4.6 + 4;
+                const mcConv = [
+                    ['rawObserved', 'the direct percentage computed from answered items (transparent, intuitive).'],
+                    ['adjusted', 'the conservative shrinkage-adjusted percentage (used to stabilise estimates when data are sparse).'],
+                    ['nAnswered and expectedCount', 'the count of items answered in the dimension.'],
+                    ["Cronbach's alpha", 'when available, showing internal reliability (null if not computable).'],
+                ];
+                mcConv.forEach(c => {
+                    doc.setFillColor(...colors.cyan500); doc.circle(layout.margin + 2, y - 1, 1.2, 'F');
+                    setFont('bold', 8.5, colors.slate900);
+                    doc.text(c[0] + ' \u2014 ', layout.margin + 6, y);
+                    const bw = doc.getTextWidth(c[0] + ' \u2014 ');
+                    setFont('normal', 8.5, colors.slate700);
+                    const cl = doc.splitTextToSize(c[1], layout.contentW - 10 - bw);
+                    doc.text(cl, layout.margin + 6 + bw, y);
+                    y += cl.length * 4.4 + 2.5;
+                });
+                y += 3;
+                setFont('bold', 9.5, colors.slate900);
+                doc.text('Completeness and flags:', layout.margin, y);
+                y += 6;
+                const mcFlags = [
+                    ['Instrument completeness', 'proportion of all items answered; if <50% the overall score is flagged as insufficient and visibly penalised.'],
+                    ['Insufficient dimensions', 'dimensions with too few answered items are marked and their scores may be omitted from the overall aggregation.'],
+                    ['Quality flags', 'automatic indicators (tooFast, straightline) appear prominently; flagged responses are recommended for review or exclusion from norms.'],
+                ];
+                mcFlags.forEach(c => {
+                    doc.setFillColor(...colors.violet); doc.circle(layout.margin + 2, y - 1, 1.2, 'F');
+                    setFont('bold', 8.5, colors.slate900);
+                    doc.text(c[0] + ' \u2014 ', layout.margin + 6, y);
+                    const bw = doc.getTextWidth(c[0] + ' \u2014 ');
+                    setFont('normal', 8.5, colors.slate700);
+                    const cl = doc.splitTextToSize(c[1], layout.contentW - 10 - bw);
+                    doc.text(cl, layout.margin + 6 + bw, y);
+                    y += cl.length * 4.4 + 2.5;
+                });
+                y += 3;
+                setFont('italic', 8.5, colors.slate500);
+                const mcClose = 'These conventions are applied to increase interpretability for participants and confidence for corporate stakeholders while preserving statistical conservatism where data are sparse.';
+                const mcCloseL = doc.splitTextToSize(mcClose, layout.contentW);
+                doc.text(mcCloseL, layout.margin, y);
+                y += mcCloseL.length * 4.4 + 8;
+
+                doc.setFillColor(...colors.slate800);
+                doc.roundedRect(layout.margin, y, layout.contentW, 24, 3, 3, 'F');
+                setFont('bold', 9.5, colors.cyan500);
+                doc.text('Scoring algorithm', layout.margin + 5, y + 7);
+                setFont('normal', 8.5, colors.slate100);
+                doc.text('Bayesian shrinkage: score = (n \u00d7 raw% + K \u00d7 prior) / (n + K), where K = 3 and prior = 60%. Shrinkage applies only where n < 4; the shrinkage weight adapts to each dimension\u2019s reliability (higher \u03b1 \u2192 less pull).', layout.margin + 5, y + 13, { maxWidth: layout.contentW - 10 });
+                y += 30;
+
+                doc.setFillColor(255, 251, 235);
+                doc.setDrawColor(251, 191, 36); doc.setLineWidth(0.5);
+                doc.roundedRect(layout.margin, y, layout.contentW, 18, 3, 3, 'FD');
+                setFont('bold', 9, colors.slate900);
+                doc.text('Disclaimer:', layout.margin + 5, y + 7);
+                setFont('normal', 8.5, colors.slate700);
+                doc.text('This is an organizational/individual diagnostic tool, not a validated clinical or academic instrument.', layout.margin + 5, y + 13, { maxWidth: layout.contentW - 10 });
+                y += 25;
+                setFont('bold', 9, colors.violet);
+                doc.text('For methodology enquiries or workshop facilitation: sreejith@futureowork.com', layout.margin, y);
+
                 // --- PAGE 4: DETAILED ROSTER ---
                 doc.addPage();
                 addHeader();
                 y = 35;
                 setFont('bold', 16, colors.slate900);
                 doc.text('DETAILED ROSTER', layout.margin, y);
+                accentRule(layout.margin, y + 2.6, 58);
                 y += 4;
                 setFont('normal', 9, colors.slate500);
                 doc.text('All participants included in this team aggregate report.', layout.margin, y);
@@ -4999,8 +5505,8 @@
                 addFooter();
                 
                 console.log('7. Saving PDF...');
-                const filename = `AI_Team_Report_${organization.replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;
-                doc.save(filename);
+                const filename = `AI_Team_Report_${organization.replace(/\s+/g,'_')}_${fmtDateFile()}.pdf`;
+                self._pdfDeliver(doc, filename);
                 console.log('=== Team PDF Generated Successfully ===');
                 console.log('Filename:', filename);
         },
@@ -5008,9 +5514,10 @@
         // Both export buttons now emit the SAME canonical dataset as the Google Sheet
         // (identical columns, identical order) via buildFlatData(). Nothing the user
         // inputs can be missing from either backend file.
-        _buildCanonicalCSV() {
-            if (!this.state.responses.length) { alert('No responses to export yet.'); return null; }
-            const rows = this.state.responses.map(r => this.buildFlatData(r));
+        _buildCanonicalCSV() { return this._buildCanonicalCSVFrom(this.state.responses); },
+        _buildCanonicalCSVFrom(list) {
+            if (!list || !list.length) { alert('No responses to export yet.'); return null; }
+            const rows = list.map(r => this.buildFlatData(r));
             const headers = Object.keys(rows[0]);
             const fmt = (v) => {
                 if (v === null || v === undefined) return '';
@@ -5073,33 +5580,8 @@ try {
 })();
 }catch(e){}
 
-try{
-const _origGeneratePDF = generatePDF;
-generatePDF = async function(record){
-  try{
-    const pdf = await _origGeneratePDF.apply(this, arguments);
-  }catch(e){}
-}
-}catch(e){}
 
 </script>
 
-    <div class="methodology-callouts" style="margin-top:12px;padding:12px;border-left:4px solid #0ea5a4;background:#f8fafb;">
-      <h4 style="margin:0 0 6px 0;font-weight:700;">Key reporting conventions</h4>
-      <p style="margin:0 0 8px 0;">To ensure clarity and scientific rigour, the report presents both the observed measure and the statistically adjusted score. The following are presented for each dimension:</p>
-      <ul style="margin:6px 0 8px 18px;">
-        <li><strong>rawObserved</strong> — the direct percentage computed from answered items (transparent, intuitive).</li>
-        <li><strong>adjusted</strong> — the conservative shrinkage-adjusted percentage (used to stabilise estimates when data are sparse).</li>
-        <li><strong>nAnswered</strong> and <strong>expectedCount</strong> — the count of items answered in the dimension.</li>
-        <li><strong>Cronbach's alpha</strong> — when available, showing internal reliability (null if not computable).</li>
-      </ul>
-      <p style="margin:0 0 8px 0;">Completeness and flags:</p>
-      <ul style="margin:6px 0 0 18px;">
-        <li><strong>Instrument completeness</strong> — proportion of all items answered; if &lt;50% the overall score is flagged as <em>insufficient</em> and visibly penalised.</li>
-        <li><strong>Insufficient dimensions</strong> — dimensions with too few answered items are marked and their scores may be omitted from the overall aggregation.</li>
-        <li><strong>Quality flags</strong> — automatic indicators (tooFast, straightline) appear prominently; flagged responses are recommended for review or exclusion from norms.</li>
-      </ul>
-      <p style="margin:10px 0 0 0;font-size:0.92em;color:#334155;">These conventions are applied to increase interpretability for participants and confidence for corporate stakeholders while preserving statistical conservatism where data are sparse.</p>
-    </div>
     </body>
 </html>
