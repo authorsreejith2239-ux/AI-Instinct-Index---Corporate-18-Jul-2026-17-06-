@@ -193,7 +193,7 @@
         get API_URL() { return this.DEPLOYMENT_URL; },
         // The app refuses to guess: it states plainly when the Apps Script code in
         // your Google account is older than this build expects.
-        REQUIRED_API_LEVEL: 3
+        REQUIRED_API_LEVEL: 4
     };
 
     /* =====================================================================
@@ -499,7 +499,10 @@
             submitState: '',          // '', 'submitting', 'confirmed', 'pending'
             opsAlphaCompany: '',
             opsCodeSent: '',
-            opsIncludeRevoked: false
+            opsIncludeRevoked: false,
+            centralCompanies: null,   // authoritative licensed-company list for registration
+            centralRecon: null,       // central seat/attempt reconciliation (spec §10)
+            invSearch: ''
         },
 
         init() {
@@ -507,6 +510,7 @@
             this.applyLicenceFromUrl();
             this.resolveUrlToken();          // v18: server-authoritative link resolution
             this.retryPendingUploads();      // v18: resume any unacknowledged submissions
+            this.loadCentralCompanies(false); // v18_F6: registration dropdown is server-fed
             // Set logo images dynamically
             setTimeout(() => {
                 const regLogo = document.getElementById('reg-logo');
@@ -1530,7 +1534,7 @@
                                                     <button onclick="app.retake(${actualIndex})" class="text-slate-400 hover:text-amber-400 transition" title="Retake Assessment">
                                                         <i class="fa-solid fa-rotate-right text-lg"></i>
                                                     </button>
-                                                    ${(this.state.adminView === 'ops' && r.surveyId) ? `<button onclick="app.revokeAndReissue('${r.surveyId}', '${(r.user.name||'').replace(/'/g,"")}')" class="text-amber-400 hover:text-amber-300 transition" title="Revoke &amp; Reissue (authorised retake)"><i class="fa-solid fa-rotate-left text-xs"></i></button>` : ''}
+                                                    ${(this.state.adminView === 'ops' && r.surveyId) ? `<button onclick="app.revokeAndReissue('${r.surveyId}', '${(r.user.name||'').replace(/'/g,"")}', '${parseRecordDate(r) ? fmtDateTime(new Date(parseRecordDate(r))) : ''}', '${(r.user.licenceId||'')}')" class="text-amber-400 hover:text-amber-300 transition" title="Revoke &amp; Reissue (authorised retake)"><i class="fa-solid fa-rotate-left text-xs"></i></button>` : ''}
                                                     <button onclick="app.moveToTrash(${actualIndex})" class="text-slate-400 hover:text-red-400 transition" title="Move to Trash">
                                                         <i class="fa-solid fa-trash text-lg"></i>
                                                     </button>
@@ -1557,7 +1561,7 @@
 
             /* ---------- Seat Dashboard aggregates ---------- */
             const licStats = this.state.licences.map(l => ({
-                l, used: this.licenceUsage(l), status: this.licenceEffectiveStatus(l), days: this.licenceDaysToExpiry(l)
+                l, used: this.centralSeatUsage(l.id).used, central: this.centralSeatUsage(l.id).central, status: this.licenceEffectiveStatus(l), days: this.licenceDaysToExpiry(l)
             }));
             const seatsPurchased = licStats.reduce((a, s) => a + (s.l.seats || 0), 0);
             const seatsUsed = licStats.reduce((a, s) => a + s.used, 0);
@@ -1690,7 +1694,7 @@
                         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                             ${dashCard('Licences', licStats.length, 'fa-id-badge', 'text-violet-400', '')}
                             ${dashCard('Seats Purchased', seatsPurchased, 'fa-chair', 'text-cyan-400', '')}
-                            ${dashCard('Seats Used', seatsUsed, 'fa-user-check', 'text-teal-400', overallCompletion + '% completion')}
+                            ${dashCard('Seats Used', seatsUsed, 'fa-user-check', 'text-teal-400', (this.state.centralRecon ? 'centrally computed · ' : 'local estimate · ') + overallCompletion + '% completion')}
                             ${dashCard('Seats Remaining', seatsRemaining, 'fa-hourglass-half', 'text-slate-400', '')}
                             ${dashCard('Expiring ≤ 30d', expiringSoon, 'fa-triangle-exclamation', 'text-amber-400', '')}
                             ${dashCard('Expired', expiredCount, 'fa-circle-xmark', 'text-rose-400', '')}
@@ -1758,13 +1762,19 @@
                             <button id="xinv-create-btn" onclick="app.invCreateFromForm()" class="bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase transition">Create Invitation</button>
                         </div>
                         ${(this.state.invitations && this.state.invitations.length) ? `
+                        <input type="text" id="inv-search" value="${(this.state.invSearch || '').replace(/"/g,'&quot;')}" oninput="app.state.invSearch=this.value; clearTimeout(app._invSearchT); app._invSearchT=setTimeout(()=>app.render(),250);" placeholder="Search by email, name, organisation or status…" class="w-full md:w-96 bg-slate-950/50 border border-white/10 rounded-xl px-3 py-2 text-white text-xs outline-none focus:border-cyan-500 mb-3">
                         <div class="overflow-x-auto">
                             <table class="w-full min-w-[820px] text-left">
                                 <thead class="bg-slate-900/80 text-[8px] uppercase font-bold text-slate-400 tracking-wider">
                                     <tr><th class="px-3 py-2">Recipient</th><th class="px-3 py-2">Context</th><th class="px-3 py-2">Purpose</th><th class="px-3 py-2 text-center">Status</th><th class="px-3 py-2">Expiry</th><th class="px-3 py-2 text-center">Actions</th></tr>
                                 </thead>
                                 <tbody class="divide-y divide-white/5">
-                                    ${this.state.invitations.map(iv => {
+                                    ${this.state.invitations.filter(iv => {
+                                        const q = (this.state.invSearch || '').toLowerCase().trim();
+                                        if (!q) return true;
+                                        return [iv.Recipient_Email, iv.Recipient_Name, iv.Company_Context, iv.Role_Title, iv.Purpose, iv.Status]
+                                            .some(v => String(v || '').toLowerCase().includes(q));
+                                    }).map(iv => {
                                         const st = String(iv.Status || 'CREATED').toUpperCase();
                                         const cls = st === 'COMPLETED' ? 'bg-violet-500/20 text-violet-300' : (st === 'REVOKED' ? 'bg-rose-500/20 text-rose-400' : (st === 'SENT' ? 'bg-teal-500/20 text-teal-400' : 'bg-slate-600/30 text-slate-300'));
                                         return `
@@ -2245,6 +2255,39 @@
                             </table>
                         </div>
                     </div>
+
+                    <!-- SEAT & ATTEMPT RECONCILIATION (central, spec §10) -->
+                    ${(() => {
+                        const rec = this.state.centralRecon;
+                        return `
+                        <div class="glass-card p-6 rounded-2xl">
+                            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                <div class="text-[10px] text-slate-400 uppercase tracking-wider"><i class="fa-solid fa-scale-balanced text-violet-400 mr-2"></i>Seat &amp; Attempt Reconciliation — centrally computed</div>
+                                <button onclick="app.loadReconciliation()" class="text-[9px] text-slate-500 hover:text-violet-300 uppercase tracking-wider transition"><i class="fa-solid fa-rotate mr-1"></i>Recompute</button>
+                            </div>
+                            ${(!rec || !rec.licences) ? `<p class="text-[10px] text-slate-500">Not yet fetched — press Recompute. Requires a live backend session.</p>` : (!rec.licences.length ? `<p class="text-[10px] text-slate-500">No licences in scope.</p>` : `
+                            <div class="overflow-x-auto">
+                                <table class="w-full min-w-[720px] text-left">
+                                    <thead class="bg-slate-900/80 text-[8px] uppercase font-bold text-slate-400 tracking-wider">
+                                        <tr><th class="px-3 py-2">Licence</th><th class="px-3 py-2">Company</th><th class="px-3 py-2 text-center">Seats</th><th class="px-3 py-2 text-center">Used</th><th class="px-3 py-2 text-center">Remaining</th><th class="px-3 py-2 text-center">Valid</th><th class="px-3 py-2 text-center">Revoked</th><th class="px-3 py-2 text-center">Outstanding</th></tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-white/5">
+                                        ${rec.licences.map(x => `<tr class="hover:bg-white/5 transition text-[10px]">
+                                            <td class="px-3 py-2 font-mono text-cyan-300">${x.licenceId}</td>
+                                            <td class="px-3 py-2 text-slate-300">${x.company || '—'}</td>
+                                            <td class="px-3 py-2 text-center text-slate-300">${x.seatsPurchased}</td>
+                                            <td class="px-3 py-2 text-center font-bold text-teal-400">${x.uniqueSeatsUsed}</td>
+                                            <td class="px-3 py-2 text-center ${x.seatsRemaining === 0 ? 'text-rose-400 font-bold' : 'text-slate-300'}">${x.seatsRemaining}</td>
+                                            <td class="px-3 py-2 text-center text-slate-300">${x.validCompleted}</td>
+                                            <td class="px-3 py-2 text-center ${x.revoked ? 'text-rose-300' : 'text-slate-500'}">${x.revoked}</td>
+                                            <td class="px-3 py-2 text-center ${x.reissuedOutstanding ? 'text-amber-300' : 'text-slate-500'}">${x.reissuedOutstanding}</td>
+                                        </tr>`).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="text-[8px] text-slate-600 mt-2">Seats Used = distinct employees with a non-revoked attempt (server-computed). Reissues are seat-neutral. Generated ${rec.generatedAt ? fmtDateTime(rec.generatedAt) : ''}.</p>`)}
+                        </div>`;
+                    })()}
 
                     <!-- COMPANY-WISE LIVE RELIABILITY -->
                     ${(() => {
@@ -3129,9 +3172,9 @@
         },
 
         /* ================= v18 REVOKE & REISSUE (scoped, server enforced) ================= */
-        async revokeAndReissue(surveyId, label) {
+        async revokeAndReissue(surveyId, label, completedAt, licenceId) {
             const reasons = ['Technical error', 'Wrong respondent details', 'Accidental submission', 'Authorised retest \u2014 other'];
-            const pick = prompt('REVOKE & REISSUE\n\nRecord: ' + label + '\nSurvey ID: ' + surveyId +
+            const pick = prompt('REVOKE & REISSUE\n\nRecord: ' + label + '\nSurvey ID: ' + surveyId + (completedAt ? '\nCompleted: ' + completedAt : '') + (licenceId ? '\nLicence: ' + licenceId : '') +
                 '\n\nThe original record is retained for audit and marked REVOKED; it stops counting toward valid completions. A fresh single-use link is issued to the SAME email. No additional seat is consumed.\n\nSelect a reason (1-4):\n' +
                 reasons.map((r, i) => (i + 1) + '. ' + r).join('\n'), '1');
             if (pick === null) return;
@@ -3522,7 +3565,38 @@
         // Companies that currently hold a licence (node licences and legacy quotas), each with the
         // email domain it was provisioned for. This feeds the registration page dropdown directly
         // from the Super Admin provisioning data — no manual duplication anywhere.
+        // Central seat/attempt reconciliation (spec §10). Seat usage is calculated by
+        // the SERVER from non-revoked attempts — never from this browser's local array.
+        async loadReconciliation(silent) {
+            const r = await AIII_API.call('ops.reconciliation', {});
+            if (r && r.ok) { this.state.centralRecon = r; if (!silent) this.render(); }
+            return this.state.centralRecon;
+        },
+        // Central seat usage for a licence when available; local count only as an
+        // explicitly-labelled offline estimate.
+        centralSeatUsage(licId) {
+            const rec = this.state.centralRecon && this.state.centralRecon.licences
+                ? this.state.centralRecon.licences.find(x => x.licenceId === licId) : null;
+            return rec ? { used: rec.uniqueSeatsUsed, central: true } : { used: this.licenceUsage(this.state.licences.find(l => l.id === licId) || { id: licId }), central: false };
+        },
+        // Fetch the authoritative licensed-company list (public endpoint — works on a
+        // fresh device with no cache, which is exactly where participants register).
+        async loadCentralCompanies(silent) {
+            const r = await AIII_API.call('flow.companies', {});
+            if (r && r.ok && Array.isArray(r.companies)) {
+                this.state.centralCompanies = r.companies;
+                // Keep the domain registry warm so email-domain locking works too.
+                r.companies.forEach(c => { if (c.domain) this.setOrgDomain(c.name, c.domain, true); });
+                if (!silent && this.state.view === 'reg') this.render();
+            }
+            return this.state.centralCompanies;
+        },
         getLicensedCompanies() {
+            // v18: the central list is authoritative. The local derivation below remains
+            // only as an offline fallback for devices that hold a provisioning cache.
+            if (Array.isArray(this.state.centralCompanies) && this.state.centralCompanies.length) {
+                return [...this.state.centralCompanies].sort((a, b) => a.name.localeCompare(b.name));
+            }
             const map = {};
             const addCo = (name, domain) => {
                 const key = String(name || '').trim();
@@ -3686,7 +3760,8 @@
         },
 
 
-        navigate(v) { 
+        navigate(v) {
+            if (v === 'reg' && !this.state.activeLicence && !this.state.activeInvite) this.loadCentralCompanies(false); 
             if (v === 'hero') {
                 this.state.user = null;
                 this.state.answers = new Array(allQuestions.length).fill(null);
@@ -3772,7 +3847,7 @@
             AIII_API.call('auth.superLogin', { key: p1 + '-' + p2 }).then(r => {
                 if (r && r.ok && r.session) {
                     AIII_API.setSession(r.session, 'SUPER', null);
-                    this.centralLoad(true).then(() => { this.invRefresh(true).then(() => this.render()); });
+                    this.centralLoad(true).then(() => Promise.all([this.invRefresh(true), this.loadReconciliation(true)]).then(() => this.render()));
                 } else {
                     this.state.central = { loaded: this.state.central.loaded, stale: true,
                         lastSync: this.state.central.lastSync,
