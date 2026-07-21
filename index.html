@@ -2900,6 +2900,57 @@
             await this.centralLoad();
         },
 
+        // A link is useless if it cannot be copied. alert() steals focus from the page,
+        // which silently cancels navigator.clipboard — so every link is now delivered
+        // through this panel instead: selectable text, a reliable Copy button with an
+        // execCommand fallback, and one-tap email / WhatsApp handoff.
+        showLinkPanel(opts) {
+            const o = opts || {};
+            const link = o.link || '';
+            const who = o.email ? (o.name ? o.name + ' (' + o.email + ')' : o.email) : '';
+            const subject = o.subject || 'Your personal invitation — AI Instinct Index';
+            const body = (o.body || ('Dear ' + (o.name || 'colleague') + ',\n\n' +
+                'You are personally invited to experience the AI Instinct Index — a behavioural readiness diagnostic for AI adoption.\n\n' +
+                'Your private assessment link (single use, for you only):\n' + link + '\n\n' +
+                'It takes about 15 minutes and produces your individual readiness report immediately.\n\n' +
+                'Warm regards,\nAI Instinct Index team'));
+            const existing = document.getElementById('link-panel');
+            if (existing) existing.remove();
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay';
+            overlay.id = 'link-panel';
+            overlay.innerHTML = `
+                <div class="glass-card p-8 rounded-2xl max-w-2xl w-full">
+                    <h3 class="text-xl font-black uppercase mb-1 text-center text-white">${o.title || 'Invitation Link'}</h3>
+                    ${who ? `<p class="text-[11px] text-cyan-300 text-center mb-1">${who}</p>` : ''}
+                    <p class="text-[9px] text-slate-500 text-center mb-6">Single use · shown once · copy or send it before closing this panel</p>
+                    <label class="text-[10px] text-slate-400 uppercase tracking-widest mb-2 block">Assessment link</label>
+                    <textarea id="link-panel-text" readonly rows="3" class="w-full bg-slate-950/70 border border-white/10 rounded-xl px-4 py-3 text-cyan-300 text-xs font-mono outline-none focus:border-cyan-500 resize-none">${link}</textarea>
+                    <div id="link-panel-status" class="text-[10px] text-teal-400 h-4 mt-1"></div>
+                    <div class="grid md:grid-cols-3 gap-3 mt-4">
+                        <button id="link-panel-copy" class="bg-cyan-600 hover:bg-cyan-500 text-white py-3 rounded-xl font-bold text-xs uppercase transition"><i class="fa-solid fa-copy mr-1"></i>Copy link</button>
+                        <a href="mailto:${encodeURIComponent(o.email || '')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}" class="bg-teal-600 hover:bg-teal-500 text-white py-3 rounded-xl font-bold text-xs uppercase transition text-center"><i class="fa-solid fa-envelope mr-1"></i>Email draft</a>
+                        <a href="https://wa.me/?text=${encodeURIComponent(body)}" target="_blank" rel="noopener" class="bg-emerald-700 hover:bg-emerald-600 text-white py-3 rounded-xl font-bold text-xs uppercase transition text-center"><i class="fa-brands fa-whatsapp mr-1"></i>WhatsApp</a>
+                    </div>
+                    ${o.note ? `<p class="text-[10px] text-amber-300 mt-4 text-center">${o.note}</p>` : ''}
+                    <button onclick="document.getElementById('link-panel').remove()" class="w-full mt-5 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-xl font-bold text-[10px] uppercase transition">Close</button>
+                </div>`;
+            document.body.appendChild(overlay);
+            const ta = document.getElementById('link-panel-text');
+            const status = document.getElementById('link-panel-status');
+            const copyBtn = document.getElementById('link-panel-copy');
+            if (ta) { ta.focus(); ta.select(); }
+            const flash = (msg, ok) => { if (status) { status.textContent = msg; status.className = 'text-[10px] h-4 mt-1 ' + (ok ? 'text-teal-400' : 'text-amber-400'); } };
+            flash('Link selected — press Copy, or Ctrl+C.', true);
+            if (copyBtn) copyBtn.onclick = async () => {
+                let done = false;
+                try { await navigator.clipboard.writeText(link); done = true; } catch (e) {}
+                if (!done) { try { ta.focus(); ta.select(); done = document.execCommand('copy'); } catch (e) {} }
+                if (done) { flash('✓ Copied to clipboard.', true); copyBtn.innerHTML = '<i class="fa-solid fa-check mr-1"></i>Copied'; }
+                else { ta.focus(); ta.select(); flash('Automatic copy was blocked — the link is selected, press Ctrl+C.', false); }
+            };
+        },
+
         // Translates a backend failure into an instruction a non-technical operator
         // can act on, rather than a raw error string.
         _backendGuidance(r) {
@@ -3000,11 +3051,13 @@
                 return;
             }
             const link = this.buildXInviteUrl(r.token);
-            let msg = 'Invitation created centrally for ' + email + '\n\nUnique link (shown once):\n' + link;
-            if (send && r.send && r.send.sent) msg += '\n\n\u2713 Email sent from the AIII Google account (' + (r.send.quotaLeft !== undefined ? r.send.quotaLeft + ' sends left today' : 'delivered') + ').';
-            else if (send) msg += '\n\n\u26a0 Automated email was NOT sent (' + ((r.send && r.send.reason) || 'unavailable') + '). Use Copy Link or Open Draft — the invitation itself is safely recorded.';
-            try { navigator.clipboard.writeText(link); msg += '\n\n(Link copied to clipboard.)'; } catch (e) {}
-            alert(msg);
+            const sentOk = !!(send && r.send && r.send.sent);
+            this.showLinkPanel({
+                title: 'Invitation Created', link, email, name,
+                note: sentOk ? '✓ Emailed automatically from the AIII Google account' + (r.send.quotaLeft !== undefined ? ' (' + r.send.quotaLeft + ' sends left today).' : '.')
+                     : (send ? '⚠ Automated email was not sent (' + ((r.send && r.send.reason) || 'unavailable') + '). The invitation is safely recorded — share the link using the buttons above.'
+                             : 'The invitation is recorded centrally. Share the link using the buttons above.')
+            });
             ['xinv-email','xinv-name','xinv-org','xinv-role','xinv-expiry','xinv-note'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
             await this.invRefresh();
         },
@@ -3017,9 +3070,13 @@
             const r = await AIII_API.call('inv.action', { invitationId, op, reason, expiry, send });
             if (!r || !r.ok) { alert('Action failed: ' + ((r && r.error) || 'backend unreachable')); return; }
             if (op === 'reissue' && r.token) {
-                const link = this.buildXInviteUrl(r.token);
-                try { navigator.clipboard.writeText(link); } catch (e) {}
-                alert('Fresh link issued (shown once):\n\n' + link + (r.send && r.send.sent ? '\n\n\u2713 Emailed to the recipient.' : '\n\n\u26a0 Not emailed automatically — share the link above.'));
+                const inv = (this.state.invitations || []).find(x => x.Invitation_ID === invitationId) || {};
+                this.showLinkPanel({
+                    title: 'Fresh Link Issued', link: this.buildXInviteUrl(r.token),
+                    email: inv.Recipient_Email || '', name: inv.Recipient_Name || '',
+                    note: (r.send && r.send.sent) ? '✓ Emailed to the recipient. The previous link no longer works.'
+                                                  : '⚠ Not emailed automatically — share the link above. The previous link no longer works.'
+                });
             }
             await this.invRefresh();
         },
@@ -3084,11 +3141,14 @@
             const send = confirm('Email the fresh link to the employee now?\n\nOK = send automatically, Cancel = show me the link to share.');
             const r = await AIII_API.call('admin.revokeReissue', { surveyId, reason, send });
             if (!r || !r.ok) { alert('Revoke & reissue failed: ' + ((r && r.error) || 'backend unreachable')); return; }
-            let msg = 'Revoked and reissued.\n\nOriginal attempt: ' + r.revokedAttemptId + ' (retained, marked REVOKED)\nReplacement attempt: ' + r.newAttemptId + '\nEmail (unchanged): ' + r.email + '\n\nFresh link:\n' + r.link;
-            if (r.send && r.send.sent) msg += '\n\n\u2713 Emailed automatically.';
-            else if (send) msg += '\n\n\u26a0 Not emailed (' + ((r.send && r.send.reason) || 'unavailable') + ') \u2014 share the link above.';
-            try { navigator.clipboard.writeText(r.link); } catch (e) {}
-            alert(msg);
+            this.showLinkPanel({
+                title: 'Revoked & Reissued', link: r.link, email: r.email, name: label || '',
+                subject: 'Your fresh AI Instinct Index assessment link',
+                body: 'A fresh assessment attempt has been authorised for you.\n\nYour new private link (single use):\n' + r.link +
+                      '\n\nYour previous attempt has been withdrawn by your administrator. This replacement does not affect your organisation\u2019s seat count.\n\nAI Instinct Index team',
+                note: (r.send && r.send.sent) ? '✓ Emailed automatically. Original attempt ' + r.revokedAttemptId + ' retained and marked REVOKED; no extra seat consumed.'
+                     : '⚠ Not emailed (' + ((r.send && r.send.reason) || 'unavailable') + ') — share the link above. Original attempt retained and marked REVOKED; no extra seat consumed.'
+            });
             await this.opsRefresh();
         },
 
